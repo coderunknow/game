@@ -69,7 +69,9 @@ The build is reproducible from this repository (see `scripts/build-windows.sh`):
 3. `game\` and docs are staged, zipped into the portable package and embedded
    into the installer payload.
 
-Toolchain used for the published artifacts: `ziglang==0.17.0` from PyPI,
+Toolchain used for the published artifacts: `ziglang==0.16.0` from PyPI
+   (pinned to 0.16.0 because that is the newest ziglang release with both Linux
+   and Windows wheels on PyPI),
 `webview-node@0.1.41` from npm (source of the WebView2 SDK files), Python 3,
 zip. On a machine with those installed:
 
