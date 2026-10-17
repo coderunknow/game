@@ -1,5 +1,6 @@
 ffmpeg*
 node_modules/
 dist/
+build/
 .qodo
 eslint.log

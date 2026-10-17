@@ -1,0 +1,107 @@
+name: Windows release
+
+# Builds and validates the Windows x64 desktop package of Plants vs. Zombies:
+# MODDED.
+#
+#   - workflow_dispatch : build + validate a candidate commit and upload the
+#     artifacts for manual testing (no release is created).
+#   - push of a v* tag  : build + validate + publish a GitHub pre-release with
+#     the installer, the portable ZIP, their SHA-256 checksums and notes.
+#
+# Least privilege: only the contents:write permission is used (for creating the
+# release on tag builds). No deployment, mirroring or upstream write access.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned toolchain (ziglang==0.17.0)
+        run: python -m pip install ziglang==0.17.0
+
+      - name: Build installer + portable ZIP
+        shell: bash
+        run: bash scripts/build-windows.sh
+
+      - name: "Validate packaged application (--selftest)"
+        shell: bash
+        working-directory: build/win/portable
+        run: |
+          # PVZM.exe is a GUI-subsystem executable: stdout is not attached to a
+          # console, so read the JSON result from the file it writes.
+          ./PVZM.exe --selftest selftest.json || echo "selftest exit=$?"
+          cat selftest.json
+          python -c "import json; d=json.load(open('selftest.json')); assert d['layout'] and d['webview2Runtime'], d; print('selftest OK', d)"
+
+      - name: "Validate packaged application (--smoke, real Soak-shroom gameplay)"
+        shell: bash
+        working-directory: build/win/portable
+        run: |
+          # Drives the packaged app end to end: boots the game, loads level 1-1,
+          # plants Soak-shroom on the top row and a lower row, spawns zombies and
+          # verifies bullets, damage, animation and game-loop survival.
+          ./PVZM.exe --smoke smoke.json || { echo "smoke exited non-zero"; cat smoke.json 2>/dev/null; exit 1; }
+          cat smoke.json
+          python -c "
+          import json
+          d = json.load(open('smoke.json'))
+          assert d.get('ok'), d
+          c = d.get('checks') or {}
+          for k in ('bullet', 'shootGif', 'loopAlive', 'localAsset', 'zombieDamaged', 'noReferenceError'):
+              assert c.get(k) is True, (k, d)
+          print('smoke OK:', d)
+          "
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-${{ github.sha }}
+          path: |
+            dist/PVZM-win64-portable.zip
+            dist/PVZM-Setup-x64.exe
+            dist/SHA256SUMS.txt
+          retention-days: 14
+
+      - name: "Publish pre-release (v* tags only)"
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          NOTES="$(mktemp)"
+          {
+            echo "Development pre-release. See desktop/RELEASE-NOTES.md in the repository."
+            echo
+            echo "### SHA-256"
+            echo '```'
+            cat dist/SHA256SUMS.txt
+            echo '```'
+            echo
+            echo "Unsigned executables. Requires Windows 10 x64 and the Microsoft Edge WebView2 Runtime."
+          } > "$NOTES"
+          gh release create "${{ github.ref_name }}" \
+            dist/PVZM-win64-portable.zip \
+            dist/PVZM-Setup-x64.exe \
+            dist/SHA256SUMS.txt \
+            --repo "${{ github.repository }}" \
+            --prerelease \
+            --title "${{ github.ref_name }}" \
+            --notes-file "$NOTES"
