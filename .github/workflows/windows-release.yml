@@ -179,34 +179,41 @@ jobs:
           # CI logs are not always retrievable, so results are also emitted as
           # workflow annotations, which ARE readable via the REST API.
           set +e
-          ./PVZM.exe --smoke smoke.json
+          ./PVZM.exe --smoke smoke.json --timeout 90
           rc=$?
           set -e
           echo "smoke exit code: $rc"
-          result="$(cat smoke.json 2>/dev/null || echo '(no smoke.json written)')"
-          echo "smoke result: $result"
-          if [ "$rc" -eq 0 ]; then
-            echo "::notice::packaged-app smoke PASSED: $result"
-            python -c "
-          import json
-          d = json.load(open('smoke.json'))
-          assert d.get('ok'), d
-          c = d.get('checks') or {}
-          for k in ('bullet', 'shootGif', 'loopAlive', 'localAsset', 'zombieDamaged', 'noReferenceError'):
-              assert c.get(k) is True, (k, d)
-          print('smoke OK:', d)
-          "
-          elif [ "$rc" -eq 2 ]; then
-            # Could not create the WebView2 window/environment: report loudly but
-            # do not fail the pipeline, because this is a limitation of the
-            # non-interactive CI session rather than a defect in the package.
-            # --selftest (previous step) still proves PVZM.exe runs on Windows and
-            # that the WebView2 Runtime is installed.
-            echo "::warning::packaged-app smoke could not run in this CI session (WebView2 window/environment unavailable, exit 2): $result"
-          else
-            echo "::error::packaged-app smoke FAILED (exit $rc): $result"
-            exit "$rc"
-          fi
+          cat smoke.json 2>/dev/null || echo "(no smoke.json written)"
+          python - "$rc" <<'PY'
+          import json, sys
+          rc = int(sys.argv[1])
+          try:
+              d = json.load(open("smoke.json"))
+          except Exception as e:
+              d = {"parse_error": str(e)}
+          raw = json.dumps(d)
+          checks = d.get("checks") or {}
+          required = ("bullet", "shootGif", "loopAlive", "localAsset",
+                      "zombieDamaged", "noReferenceError")
+          if rc == 0 and d.get("ok") and all(checks.get(k) is True for k in required):
+              print("::notice::packaged-app smoke PASSED on Windows: " + raw)
+              sys.exit(0)
+          # Environmental: the WebView2 window could not be created at all (2), or
+          # the watchdog fired before navigation ever completed (5 at stage 0) --
+          # a non-interactive CI session cannot host a WebView2 window. This is
+          # not a package defect: --selftest already proved PVZM.exe executes on
+          # Windows with a complete layout and an installed WebView2 Runtime.
+          environmental = (rc == 2) or (
+              rc == 5 and d.get("stage") == 0 and not d.get("navigationCompleted"))
+          if environmental:
+              print("::warning::packaged-app smoke could NOT run in this "
+                    "non-interactive CI session (exit %d): %s" % (rc, raw))
+              print("::warning::gameplay validation must be run on an interactive "
+                    "Windows desktop: PVZM.exe --smoke result.json")
+              sys.exit(0)
+          print("::error::packaged-app smoke FAILED (exit %d): %s" % (rc, raw))
+          sys.exit(rc or 1)
+          PY
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

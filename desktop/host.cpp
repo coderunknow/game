@@ -45,6 +45,10 @@ static std::wstring g_smokePath;
 static bool g_done = false;
 static int g_stage = 0;
 static int g_retries = 0;
+static bool g_ctrlReady = false;   /* WebView2 controller created            */
+static bool g_navIssued = false;   /* Navigate() called                      */
+static bool g_navDone = false;     /* NavigationCompleted fired              */
+static unsigned g_watchdogMs = 120000;
 static EventRegistrationToken g_navToken;
 
 static void SmokeFinish(const char* json, int exitCode);
@@ -368,8 +372,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         if (g_smoke && wp == 99) { /* watchdog */
             KillTimer(hwnd, 99);
-            char buf[128];
-            snprintf(buf, sizeof buf, "{\"ok\":false,\"stage\":%d,\"reason\":\"timeout\"}", g_stage);
+            char buf[320];
+            snprintf(buf, sizeof buf,
+                     "{\"ok\":false,\"stage\":%d,\"reason\":\"timeout\","
+                     "\"controllerCreated\":%s,\"navigationIssued\":%s,"
+                     "\"navigationCompleted\":%s,\"watchdogMs\":%u}",
+                     g_stage, g_ctrlReady ? "true" : "false",
+                     g_navIssued ? "true" : "false", g_navDone ? "true" : "false",
+                     g_watchdogMs);
             SmokeFinish(buf, 5);
             return 0;
         }
@@ -424,6 +434,7 @@ IFACEMETHODIMP CtrlCompleted::Invoke(HRESULT result, ICoreWebView2Controller* ct
     }
 
     g_controller = ctrl;
+    g_ctrlReady = true;
     ctrl->get_CoreWebView2(&g_webview);
     if (!g_webview) {
         if (g_smoke) SmokeFinish("{\"ok\":false,\"stage\":\"corewebview\"}", 2);
@@ -445,7 +456,7 @@ IFACEMETHODIMP CtrlCompleted::Invoke(HRESULT result, ICoreWebView2Controller* ct
     /* Register the smoke navigation handler BEFORE navigating (no race). */
     if (g_smoke) {
         g_webview->add_NavigationCompleted(new NavCompleted(), &g_navToken);
-        SetTimer(g_hwnd, 99, 120000, nullptr); /* watchdog */
+        SetTimer(g_hwnd, 99, g_watchdogMs, nullptr); /* watchdog */
     }
 
     /* Serve the bundled game from disk under a secure origin so ES modules
@@ -456,6 +467,7 @@ IFACEMETHODIMP CtrlCompleted::Invoke(HRESULT result, ICoreWebView2Controller* ct
             L"pvzm.game", g_exeDir.c_str(), COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
         wv3->Release();
         g_webview->Navigate(L"https://pvzm.game/game/index.html");
+        g_navIssued = true;
     } else {
         /* Very old runtime without ICoreWebView2_3: fall back to file://
          * (ES module loading may fail there; --selftest reports the version). */
@@ -464,6 +476,7 @@ IFACEMETHODIMP CtrlCompleted::Invoke(HRESULT result, ICoreWebView2Controller* ct
             if (url[i] == L'\\') url[i] = L'/';
         }
         g_webview->Navigate(url.c_str());
+        g_navIssued = true;
     }
 
     RECT rc;
@@ -475,6 +488,7 @@ IFACEMETHODIMP CtrlCompleted::Invoke(HRESULT result, ICoreWebView2Controller* ct
 
 IFACEMETHODIMP NavCompleted::Invoke(ICoreWebView2*,
                                     ICoreWebView2NavigationCompletedEventArgs* args) {
+    g_navDone = true;
     BOOL ok = FALSE;
     if (args) args->get_IsSuccess(&ok);
     if (!ok) {
@@ -586,6 +600,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
         if (wcscmp(argv[i], L"--smoke") == 0 && i + 1 < argc) {
             g_smoke = true;
             g_smokePath = argv[i + 1];
+        } else if (wcscmp(argv[i], L"--timeout") == 0 && i + 1 < argc) {
+            int sec = _wtoi(argv[i + 1]);
+            if (sec > 0 && sec < 3600) g_watchdogMs = (unsigned)sec * 1000u;
         } else if (wcscmp(argv[i], L"--selftest") == 0) {
             /* No GUI at all: validate the install layout + runtime presence.
              * Optional following argument = path to write the JSON result to.
