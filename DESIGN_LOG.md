@@ -401,3 +401,23 @@ The `--selftest`/`--smoke` modes and the workflow exist so that this exact valid
 on a real Windows runner as soon as Actions is available; until then the published
 artifacts are built in this sandbox with the same pinned toolchain versions the workflow
 specifies, and that provenance is disclosed in the release notes.
+
+### Merge gates evaluated immediately before merging PR #2
+
+| Gate | Status | Evidence |
+| --- | --- | --- |
+| PR contains the intended fix + all pre-release changes | PASS | 14 files: `game/js/plants/oGun.js`, `tests/oGun-normalattack.test.mjs`, `DESIGN_LOG.md`, `desktop/*` (6), `scripts/build-windows.sh`, `scripts/make-installer.py`, `.github/workflows/windows-release.yml`, `.github/workflows/main.yml`, `.gitignore`; `oGun.js` hunk on GitHub is exactly the `var j`/`var d` declaration change and nothing else |
+| Regression test passes | PASS | `node tests/oGun-normalattack.test.mjs` → `ok - ... regression test passed`, exit 0 at PR head `ad09588` |
+| No new lint findings / regressions | PASS | `npx oxlint@1.88.0`: base `86a3a4f` = 29 warnings/444 errors (339 files) vs branch = 29/444 (340 files); per-rule histogram `diff` empty |
+| Real-browser testing | PASS | headless Chromium 131 on the packaged tree: top row (5) and lower row (3) both fire, HP 270→210 each, bullets + `SeaShroomShoot.gif`, loop alive (36 traversal calls), local asset 200, `consoleLog` empty, `pageErrors` empty; negative control with pre-fix `oGun.js` reproduces `ReferenceError: j is not defined` and a frozen loop |
+| Windows package built + launch/gameplay checks | PARTIAL (documented) | Built and validated structurally + behaviourally on Linux: round-trip extraction of 1,625 files hash-identical, PE x86-64/GUI with no undeclared DLL imports, packaged-tree gameplay validated in Chromium via the host's own stage scripts. **The `.exe` files themselves cannot be executed here** (no Windows, no Wine) and `windows-release.yml` cannot run because Actions is disabled on this fork (token cannot enable it: 403). `--selftest`/`--smoke` are implemented and wired into the workflow for the first real Windows run |
+| Required checks / branch protection permit merge | PASS | `mergeable: MERGEABLE`, `mergeStateStatus: UNSTABLE` (a failing *non-required* check: Kilo Code Review, billing-blocked). Protection rules are not readable with this token (403), but GitHub would report `BLOCKED` if a required check or review were outstanding. No check was bypassed or disabled, no protection altered |
+| Workflow side effects verified safe for this fork | PASS | Actions inactive on the fork (0 workflows, 0 runs) and `main.yml` jobs need upstream-only `blacksmith-*` runners; additionally the `mirror` job is now gated to `github.repository == 'Plants-vs-Zombies-MODDED/game'`, so a fork push cannot publish to tangled.org/codeberg.org or POST to feed-pvzm.loxodrome.app. No secrets were read or printed |
+| Working tree / intended changes accounted for | PASS | `git status` clean after commit; `build/` and `dist/` artifacts gitignored and never staged; harness code kept outside the repo in `/home/user/harness` |
+
+Decision: all gates that can be satisfied in this environment are satisfied; the one
+partial gate (executing the Windows binaries) is an environment limitation that is
+reported rather than hidden, and the release is explicitly a **development pre-release**
+whose purpose is testing on real Windows hardware. Proceeding to merge with a merge
+commit (repository allows merge/squash/rebase; a merge commit keeps the tested PR head
+commit in history). No auto-merge.
