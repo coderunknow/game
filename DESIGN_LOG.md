@@ -421,3 +421,109 @@ reported rather than hidden, and the release is explicitly a **development pre-r
 whose purpose is testing on real Windows hardware. Proceeding to merge with a merge
 commit (repository allows merge/squash/rebase; a merge commit keeps the tested PR head
 commit in history). No auto-merge.
+
+---
+
+## 2026-10-17 — Entry 5: Merge, tag, release attempt, and the asset-upload blocker
+
+### Merge (completed)
+
+- PR #2 (`arena/64808b34-game` → `main`) merged with a **merge commit** (repository
+  allows merge/squash/rebase; a merge commit keeps the tested PR head in history).
+  No auto-merge was enabled; no protection or check was bypassed or disabled.
+- Merge commit: `07b44ac6f805b4300b6c7e229f402e5b4e53efb6`.
+- PR head at merge time: `9f8c8ee5a06c457a9c7e561698f2e71704db3841`.
+- **Tree identity verified**: `git rev-parse origin/main^{tree}` ==
+  `git rev-parse 9f8c8ee^{tree}` == `f69e0b503dbb03dab956f4f6b5691d6b5e637f38`, i.e.
+  merged content is exactly the tested content.
+- Post-merge re-test: `node tests/oGun-normalattack.test.mjs` at `07b44ac` in a
+  **clean clone from github.com** → PASS, exit 0, working tree clean.
+
+### Workflow side effects after the merge (observed, not assumed)
+
+GitHub Actions turned out to be **enabled** on the fork (the earlier `total_count: 0`
+simply meant no runs had happened yet). The merge triggered three runs:
+
+| Workflow | Trigger | Outcome |
+| --- | --- | --- |
+| `Main` (format-lint-stamp + mirror) | push to `main` @ `07b44ac` | **queued forever, never started**: job `format-lint-stamp` requires runner label `blacksmith-4vcpu-ubuntu-2404`, `runner_name: null`, `steps: []`. Therefore no repo-wide reformat, no stamp commit, no push, and the `mirror` job (which needs `format-lint-stamp`) never got created. Run: https://github.com/coderunknow/game/actions/runs/38998364851 |
+| `Lint` ×2 | pull_request @ `ad09588`, `9f8c8ee` | queued forever (same `blacksmith-*` label), never ran → the strict lint job neither passed nor blocked the merge |
+| `Windows release` | push of tag `v0.1.0-dev1` | **ran on a real Windows runner and FAILED** at the toolchain step (see below). Run: https://github.com/coderunknow/game/actions/runs/38998678200 |
+
+Consequence: `main` HEAD stayed at `07b44ac` (no workflow-generated commit), and no
+external publication occurred. The `mirror` job safeguard added in this branch
+(`github.repository == 'Plants-vs-Zombies-MODDED/game'`) is now also in `main`, so even
+if a suitable runner appeared, a fork push could not mirror to tangled.org/codeberg.org
+or POST to feed-pvzm.loxodrome.app. No secret values were read or logged at any point.
+
+### Tag (completed)
+
+- `v0.1.0-dev1` did not exist before (no tags, no releases on the fork) → created new.
+- Annotated tag object `3a35bb384eb074d6789180f4f866fb1fb997e479` →
+  commit `07b44ac6f805b4300b6c7e229f402e5b4e53efb6` (the verified final `main` HEAD).
+  Pushed to `origin` (the fork). No existing tag was moved or overwritten.
+
+### Release assets built from the tagged commit (completed, locally)
+
+- Clean clone of `https://github.com/coderunknow/game.git`, checked out `07b44ac`,
+  working tree clean, regression test PASS.
+- `bash scripts/build-windows.sh` → exit 0, `roundtrip OK: 1625 files match exactly`.
+- Artifacts: `PVZM-win64-portable.zip` (170,392,121 B) and `PVZM-Setup-x64.exe`
+  (185,426,453 B) + `SHA256SUMS.txt`.
+- Validated these exact artifacts: PE x86-64/GUI with only system+UCRT+`WebView2Loader.dll`
+  imports; all required runtime files present in the ZIP including `game/js/plants/oGun.js`
+  **containing the fix**; packaged-tree gameplay in headless Chromium using the
+  `--smoke` stage scripts extracted verbatim from `desktop/host.cpp` → top row and
+  lower row both fire (HP 270→210 each), bullets + `SeaShroomShoot.gif`, loop alive
+  (35 traversal calls), local asset HTTP 200, `consoleLog` empty, `pageErrors` empty;
+  negative control (same tree with pre-fix `oGun.js`) → FAIL with
+  `ReferenceError: j is not defined` and `loopAlive:false`.
+
+### BLOCKER 1 — release assets cannot be uploaded from this environment
+
+Creating the release object succeeded, but the asset upload failed:
+
+```
+Post "https://uploads.github.com/repos/coderunknow/game/releases/415559071/assets?...name=PVZM-Setup-x64.exe": EOF
+```
+
+`uploads.github.com` is **not reachable** from this sandbox (TLS connect failure,
+curl exit 35); only `github.com`, `api.github.com`, `codeload.github.com`,
+`registry.npmjs.org`, `pypi.org`, `files.pythonhosted.org` are allowed. GitHub rolled
+the release back, so **no partial/empty release exists** (`gh api /releases` → `[]`).
+This is why no release was published with an "assets ready" claim: publishing an
+asset-less release and calling it downloadable would be false.
+
+### BLOCKER 2 — the tag's CI run failed on the toolchain pin
+
+`ziglang==0.17.0` has **no `win_amd64` wheel** on PyPI (verified: 0.17.0 ships
+manylinux/musllinux/macOS only; 0.16.0 ships `win_amd64`, `win32`, `win_arm64` and
+manylinux). So `pip install ziglang==0.17.0` fails on `windows-latest` and the job
+aborted before building. Because a tag-push workflow uses the workflow file **at that
+tag**, and the tag must not be moved, CI cannot publish `v0.1.0-dev1` assets from that
+tag as-is. `workflow_dispatch` (which would let a fixed workflow build from the tag)
+returns **403** for this token (`actions:write` is not granted), so I cannot trigger it
+myself.
+
+### Recovery delivered for review: PR #3 (open, NOT merged)
+
+Commit `49060e84119ccb1482d456e5c9682e58a155d1b8` on `arena/64808b34-game`,
+PR https://github.com/coderunknow/game/pull/3 — pins `ziglang==0.16.0` (newest version
+with both Linux and Windows wheels), resolves the build ref explicitly so a dispatch or
+a `release: published` event can build **from an existing tag** and attach assets to that
+release idempotently (`gh release upload --clobber`), and adds a packaging-path-scoped
+`pull_request` trigger that builds and validates on a real Windows runner **without
+publishing**. Verified locally with 0.16.0 before pushing: clean-checkout build exit 0,
+round-trip 1,625 files byte-identical, PE structure unchanged, packaged-tree gameplay
+PASS and negative control FAIL as expected.
+
+PR #3's own CI run (https://github.com/coderunknow/game/actions/runs/38999320551) is the
+first execution of the packaged application on a real Windows runner — the one validation
+level that was impossible in this sandbox. Its result is recorded in Entry 6.
+
+Remaining step to deliver downloadable `v0.1.0-dev1` assets (needs a decision, because
+merging a second PR and/or dispatching a workflow was not pre-authorized):
+after PR #3 is merged, either run *Windows release* → **Run workflow** with
+`release_tag = v0.1.0-dev1`, or re-publish the release so the `release: published`
+trigger attaches CI-built assets. Both build from the tagged commit; neither moves the
+tag nor force-pushes anything.
