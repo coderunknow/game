@@ -6,6 +6,7 @@
 	"license": "PolyForm-Noncommercial-1.0.0",
 	"author": "",
 	"scripts": {
+		"test": "node --experimental-vm-modules --test",
 		"lint": "oxlint",
 		"fix": "oxlint --fix",
 		"build": "bash scripts/build.sh"

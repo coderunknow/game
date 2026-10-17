@@ -54,16 +54,16 @@ export var oGun = InheritO(oPuffShroom, {
 		var b = this;
 		var c = "PSB" + Math.random();
 		var a = b.AttackedLX;
-		((j = k.id),
-			(d = $(j)),
-			EditEle(
-				b.BulletEle.cloneNode(false),
-				{
-					id: c,
-				},
-				0,
-				EDPZ
-			));
+		var j = k.id;
+		var d = $(j);
+		EditEle(
+			b.BulletEle.cloneNode(false),
+			{
+				id: c,
+			},
+			0,
+			EDPZ
+		);
 		oSym.addTask(
 			15,
 			(e) => {
