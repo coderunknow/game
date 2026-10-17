@@ -208,3 +208,196 @@ source reading is **source-level evidence**. All three agree.
   `tests/oGun-normalattack.test.mjs` (regression test).
 - Build artifacts, scratch harnesses (`/home/user/harness`), and extracted browser
   tooling are outside the repository and are not part of the change set.
+
+---
+
+## 2026-10-17 — Entry 4: Final review, Windows desktop packaging, merge & release preparation
+
+### Request (this task)
+
+Final technical review of PR #2, then: establish the Soak-shroom fix is correct and
+regression-free; "Produce a genuinely playable Windows x64 desktop build containing the
+game and its required resources"; merge PR #2 into `coderunknow/game:main` only after
+merge gates pass; tag the final release commit `v0.1.0-dev1`; publish a GitHub pre-release
+with downloadable Windows executable assets. Constraints carried over: all work stays in
+the fork, never upstream; append-only `DESIGN_LOG.md`; audit workflow side effects before
+merging; do not bypass required checks or protections; do not fabricate test results;
+never label a scripted browser test as manual play-testing; do not clean up unrelated
+pre-existing lint debt; report blockers instead of merging to meet a deadline.
+
+### State refreshed before acting (not assumed from the previous session)
+
+| Item | Observed now |
+| --- | --- |
+| PR #2 | OPEN, base `main`, head `arena/64808b34-game` @ `7d72421`, `mergeable: MERGEABLE`, `mergeStateStatus: UNSTABLE`, no review decision, 3 files changed |
+| PR checks | `Kilo Code Review` = ACTION_REQUIRED/fail (**billing-blocked bot**: "your account is out of credits"), `CodeRabbit` = pass, Copilot review = COMMENTED, Qodo = paused (trial ended). None are required checks |
+| `main` HEAD | `86a3a4f0946368d073ae36cab512b70d1a03297f` (unchanged, no concurrent work) |
+| Tags / releases | none (`git tag -l` empty, `gh release list` empty) → `v0.1.0-dev1` is free |
+| Working tree | clean at session start |
+| GitHub Actions on this fork | **disabled/inactive**: `actions/workflows` → `total_count: 0`, `actions/runs` → `total_count: 0`; `actions/permissions` and branch-protection APIs → 403 (token scope), so protection rules could not be read directly |
+| Runner labels used by repo workflows | `blacksmith-4vcpu-ubuntu-2404`, `blacksmith-2vcpu-ubuntu-2404` (upstream-hosted custom runners, not available to a fork) |
+| Merge settings | `allow_merge_commit`, `allow_squash_merge`, `allow_rebase_merge` all true; `delete_branch_on_merge` false |
+
+### Workflow side-effect audit (mandatory pre-merge check)
+
+`.github/workflows/main.yml` (trigger: push to `main`/`staging`, plus `workflow_dispatch`)
+has two jobs:
+
+1. `format-lint-stamp` — installs oxlint/oxfmt/esbuild/html-minifier-terser globally, runs
+   `pnpm run fix || true` (failures suppressed), rewrites the whole tree with
+   `oxfmt --write .`, stamps `game/images/Zombies/CX/v.html` with the commit SHA, then
+   `git add . && git commit && git push`. **Side effect: creates a new commit on `main`
+   after the merge and rewrites sources repo-wide.**
+2. `mirror` (`if: always()`) — pushes the repository to two **external, upstream-owned**
+   destinations (`git@tangled.org:pvzm.net/game`, `git@codeberg.org:pvzm/game.git`) using
+   `TANGLED_SSH_PRIVATE_KEY` / `CODEBERG_SSH_PRIVATE_KEY`, uploads a source archive
+   artifact, then POSTs a short-lived artifact download URL plus `FEED_PVZM_LOXODROME_SECRET`
+   to `https://feed-pvzm.loxodrome.app`. **Side effect: external publication of the fork's
+   contents.**
+
+Other workflows: `lint.yml` (pull_request; strict `npx oxlint@latest --format=github` —
+would fail on pre-existing repo debt) and `resolve-stamp-conflict.yml` (pull_request, only
+when `game/images/Zombies/CX/v.html` changes — this PR does not touch it).
+
+**Assessment for this fork:** Actions are not running at all here (0 registered workflows,
+0 runs), and the two `main.yml` jobs require upstream-only `blacksmith-*` runner labels.
+So merging cannot execute them, and the fork holds none of the mirror secrets. Merging is
+therefore **not** able to publish to upstream-owned destinations in the current state.
+
+**Safeguard added anyway (defense in depth, in case Actions is ever enabled on the fork):**
+the `mirror` job condition is now
+`if: always() && github.repository == 'Plants-vs-Zombies-MODDED/game'`.
+This preserves upstream behavior exactly (the expression is true in the upstream repo) and
+makes it impossible for a push in any fork to run the mirror/feed steps. No secrets were
+read, printed or logged.
+
+The `format-lint-stamp` job was deliberately **not** altered: it is the upstream's own
+format/stamp pipeline, it cannot run on this fork, and rewriting sources is out of scope.
+Consequence recorded for the release step: after merging, `main` HEAD must be re-checked —
+if that job ever runs it would add a formatting commit, and the tag must point at the
+final verified HEAD, not at the PR head.
+
+### Packaging decision (why WebView2 + Zig, not Electron/Tauri)
+
+Established first: the repo has **no** existing Windows desktop packaging path
+(`package.json` exposes only lint/fix/build scripts for the web game; no electron/tauri
+config, no desktop entries). Environment constraints measured in this sandbox:
+
+- `registry.npmjs.org`, `pypi.org`/`files.pythonhosted.org`, `github.com`,
+  `codeload.github.com`, `api.github.com` are reachable.
+- `objects.githubusercontent.com` and `release-assets.githubusercontent.com` are **not**
+  reachable (TLS handshake failure, curl exit 35). GitHub *release assets* are served from
+  those hosts → **Electron's `electron-vX-win32-x64.zip` cannot be downloaded here**
+  (the npm `electron` package is only a downloader stub, 1.1 MB), and `nuget.org`,
+  `raw.githubusercontent.com`, `cdn.npmmirror.com` are also unreachable.
+- No `wine`, no `xvfb`, no `makensis`, no `rustc`/`cargo`, no `dotnet`, no MinGW.
+  `zig` is available via PyPI (`ziglang==0.17.0`, ~101 MB wheel) and is a complete
+  C/C++ cross-compiler for `x86_64-windows-gnu`.
+- The full Microsoft WebView2 SDK bits needed to build a native host are inside the
+  MIT-licensed npm package `webview-node@0.1.41`: `WebView2.h` (68,921 lines, includes
+  `SetVirtualHostNameToFolderMapping`), the mingw import library
+  `libWebView2Loader.a`, and the redistributable `WebView2Loader.dll`.
+
+Chosen approach — **native Win32 host + WebView2 Runtime**, built with Zig:
+
+- `desktop/host.cpp`: creates a real window, serves the bundled `game/` folder through
+  WebView2's *virtual host name mapping* (`pvzm.game` → the executable's folder) and
+  navigates to `https://pvzm.game/game/index.html`. This gives a secure origin, so ES
+  modules load exactly as on the website, with **no local web server and no network
+  involvement**. Browser arguments disable background networking/component updates;
+  user data goes to `%LOCALAPPDATA%\PVZM\WebView2`. Missing-runtime and missing-`game/`
+  cases produce clear dialogs (with a link to Microsoft's WebView2 page) instead of a
+  silent failure. DevTools stay enabled in this dev release for bug reports.
+- `desktop/setup.cpp` + `scripts/make-installer.py`: a self-extracting per-user installer
+  (no admin rights, no services, no telemetry). Payload format is documented in the source
+  header; installs to `%LOCALAPPDATA%\PVZM`, creates a Desktop shortcut, offers to launch.
+  `--extract <dir> [--from <exe>]` allows host-side round-trip verification.
+- `scripts/build-windows.sh`: reproducible build (pinned `webview-node@0.1.41`,
+  `ziglang==0.17.0`), stages the portable layout, produces both artifacts, computes
+  SHA-256, and runs the installer round-trip check.
+- `.github/workflows/windows-release.yml`: least-privilege (`contents: write` only),
+  `windows-latest`, builds from a clean checkout with pinned toolchain, runs
+  `--selftest` and `--smoke` on the **packaged application**, uploads artifacts, and on a
+  pushed `v*` tag publishes a pre-release with checksums. No deployment, mirroring or
+  upstream write access.
+- Licensing/attribution preserved in the package: `LICENSE.md` (PolyForm Noncommercial +
+  Changjiang River), `desktop/THIRD-PARTY-NOTICES.txt` (Microsoft WebView2 SDK / MIT,
+  webview-node / MIT, and the PopCap-EA IP notice), `desktop/README.md` (how it is built
+  and how to run it). Nothing represents the project as an official EA/PopCap release.
+
+Rejected alternatives: Electron (binaries unreachable here; ~200 MB; could not be
+validated at all), Tauri (no Rust toolchain and no Windows SDK here), committing a
+prebuilt binary blob into git (repo convention keeps artifacts out; `.gitignore` already
+lists `dist/`, `build/` added), and any installer that merely opens the live website
+(explicitly disallowed by the task).
+
+### Verification of the packaged application (what could and could not be run here)
+
+Environment: Linux x86_64 sandbox, Node 22, Python 3.11, `ziglang==0.17.0`,
+`webview-node@0.1.41`, headless Chromium 131 (`@sparticuz/chromium`, harness kept outside
+the repo in `/home/user/harness`). No Windows machine and no Wine → **the produced `.exe`
+files cannot be executed in this environment**; that limitation is reported rather than
+papered over. What was run:
+
+1. `bash scripts/build-windows.sh` — exit 0. Outputs
+   `dist/PVZM-win64-portable.zip`, `dist/PVZM-Setup-x64.exe`, `dist/SHA256SUMS.txt`.
+2. Installer round-trip (in-script): extracting `dist/PVZM-Setup-x64.exe` reproduces all
+   **1,625 payload files with byte-identical SHA-256** (`roundtrip OK: 1625 files match
+   exactly`). This is the strongest available proof that the installer's payload and
+   extraction code are correct.
+3. PE inspection (`pefile`): both executables are `machine 0x8664` (x64),
+   `subsystem 2` (GUI). `PVZM.exe` imports only `ADVAPI32/KERNEL32/SHELL32/USER32/ole32`
+   + UCRT `api-ms-win-crt-*` + `WebView2Loader.dll` (shipped next to it) — i.e. **no
+   undeclared adjacent DLL dependencies**; the package contains every runtime file it
+   needs, and it is documented as *not* a single standalone exe.
+4. Package inventory: portable ZIP holds 1,762 entries (1,756 under `game/`, plus
+   `PVZM.exe`, `WebView2Loader.dll`, `LICENSE.md`, `README-desktop.md`,
+   `THIRD-PARTY-NOTICES.txt`, `app.webmanifest`) — the complete game tree, no placeholders.
+5. **Staged gameplay validation of the packaged tree in real headless Chromium.**
+   `/home/user/harness/stage-scripts-verify.cjs` extracts the four `kScript*` literals
+   verbatim from `desktop/host.cpp` and runs them in the same stage order, with the same
+   delays and retry limits as the C++ state machine, against the tree extracted from the
+   installer payload (`build/win/roundtrip`). Only substitution: the packaged app's
+   `https://pvzm.game/game/...` origin is rewritten to the local static server serving the
+   same files. Result (post-fix):
+   - probe: `{"ready":"complete","engine":true,"selectModal":true,"oGun":true,"oGunAttack":true,"boot":"ok"}`
+   - level: `{"level0":true,"select":"ok"}` (level 1-1 via production `SelectModal`)
+   - scenario: Soak-shroom planted on the **top row (5)** and a **lower row (3)**, one
+     zombie per row
+   - collect: `{"topHP":210,"lowerHP":210,"hp0":270,"bulletSeen":true,"shootGifSeen":true,
+     "loopCalls":36,"loopAlive":true,"assetStatus":200,"consoleLog":[]}`
+   - pass criteria all true: bullet, shoot gif, loop alive, local asset (HTTP 200 from the
+     bundled folder), zombie damaged on both rows (270→210 = 3 hits × 20), no
+     `ReferenceError`; page errors `[]`
+6. **Negative control for the packaged smoke test**: the same scripts against an identical
+   tree whose only difference is the pre-fix `game/js/plants/oGun.js`
+   (`git show 86a3a4f:...`) → FAIL, with the production stack
+   `ReferenceError: j is not defined at NormalAttack (oGun.js:57:7) → CheckLoop
+   (Cfunction.js:4342) → TriggerCheck (4338) → chkD0 (1639) → processRow (1571) →
+   traversalOf (1594) → loop (1283) → Monitor (1285) → level/1.js:68`, `loopCalls: 1`,
+   `loopAlive: false`, no bullets, HP 270 on both rows. This proves the packaged-app smoke
+   check genuinely detects the reported regression rather than passing trivially.
+7. `node tests/oGun-normalattack.test.mjs` — **PASS** (exit 0) on the current PR head.
+   Baseline behavior re-confirmed earlier (fails with `j is not defined`), and re-confirmed
+   here in a browser context via item 6.
+8. Lint parity with the CI tool at a **pinned** version (`npx oxlint@1.88.0`, both trees):
+   base `86a3a4f` = `29 warnings / 444 errors` on 339 files; this branch = `29 warnings /
+   444 errors` on 340 files (the added file is the test). Per-rule finding counts are
+   **identical** (`diff` of rule histograms: no difference), and the changed-file scan
+   reports only the two pre-existing `no-nested-ternary` findings in `oGun.js` (lines 26
+   and 78 — untouched code). No new findings introduced; no unrelated lint debt cleaned up.
+   (The `449 errors` figure in Entry 3 came from `oxlint@latest` at that time; version
+   drift, not a change in this branch.)
+9. Hygiene: no credentials in the new files (the only `*token*` hits are the
+   `EventRegistrationToken` type), no generated files or build artifacts staged
+   (`build/`, `dist/` are gitignored), no reformatting churn — the diff touches only the
+   intended files.
+
+Not run / not available, with reasons: executing `PVZM.exe` or `PVZM-Setup-x64.exe`
+(no Windows, no Wine in the sandbox); `windows-release.yml` on a real Windows runner
+(GitHub Actions is disabled on this fork and the token cannot enable it — 403); manual
+play-testing (all browser evidence is scripted automation, never claimed as manual).
+The `--selftest`/`--smoke` modes and the workflow exist so that this exact validation runs
+on a real Windows runner as soon as Actions is available; until then the published
+artifacts are built in this sandbox with the same pinned toolchain versions the workflow
+specifies, and that provenance is disclosed in the release notes.

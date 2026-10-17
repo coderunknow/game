@@ -73,7 +73,13 @@ jobs:
     mirror:
         runs-on: blacksmith-2vcpu-ubuntu-2404
         needs: format-lint-stamp
-        if: always()
+        # Safeguard (fork safety): this job publishes to upstream-owned external
+        # destinations (tangled.org, codeberg.org, feed-pvzm.loxodrome.app) using
+        # upstream secrets. Run it only in the original upstream repository so a
+        # push in any fork can never publish there. Upstream behavior is
+        # unchanged. Forks have none of these secrets; skipping also avoids
+        # failed/partial mirror attempts.
+        if: always() && github.repository == 'Plants-vs-Zombies-MODDED/game'
         steps:
             - uses: actions/checkout@v4
               with:
