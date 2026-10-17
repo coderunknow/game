@@ -1,21 +1,44 @@
 name: Windows release
 
 # Builds and validates the Windows x64 desktop package of Plants vs. Zombies:
-# MODDED.
+# MODDED on a real Windows runner.
 #
-#   - workflow_dispatch : build + validate a candidate commit and upload the
-#     artifacts for manual testing (no release is created).
-#   - push of a v* tag  : build + validate + publish a GitHub pre-release with
-#     the installer, the portable ZIP, their SHA-256 checksums and notes.
+# Triggers
+#   pull_request (packaging paths only) : build + validate only, never publishes.
+#   workflow_dispatch                   : build + validate; if release_tag is
+#                                         given, build from that tag and attach
+#                                         the assets to that release.
+#   push of a v* tag                    : build + validate + publish a pre-release.
+#   release published                   : attach freshly built assets to that
+#                                         release (idempotent, overwrites).
 #
-# Least privilege: only the contents:write permission is used (for creating the
-# release on tag builds). No deployment, mirroring or upstream write access.
+# Least privilege: contents:write only (needed to create releases / upload
+# assets). No deployment, mirroring or upstream write access.
+#
+# Note on the toolchain pin: ziglang publishes Windows wheels only up to
+# 0.16.0 (0.17.0 has manylinux/macOS wheels but no win_amd64 wheel), so
+# 0.16.0 is pinned for all platforms to keep one toolchain everywhere.
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing tag to build from and attach assets to (leave empty to build+validate only)"
+        required: false
+        default: ""
+  pull_request:
+    paths:
+      - "desktop/**"
+      - "scripts/build-windows.sh"
+      - "scripts/make-installer.py"
+      - ".github/workflows/windows-release.yml"
   push:
+    branches:
+      - main
     tags:
       - "v*"
+  release:
+    types: [published]
 
 permissions:
   contents: write
@@ -25,22 +48,44 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
+      - name: Resolve build ref
+        id: ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          REF="${{ github.sha }}"
+          TAG=""
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.release_tag }}"
+            if [ -n "$TAG" ]; then REF="$TAG"; fi
+          elif [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+            REF="$TAG"
+          elif [ "${{ github.event_name }}" = "push" ] && [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            TAG="${{ github.ref_name }}"
+          fi
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "building from ref=$REF publish_tag=${TAG:-<none>}"
+
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install pinned toolchain (ziglang==0.17.0)
-        run: python -m pip install ziglang==0.17.0
+      - name: Install pinned toolchain (ziglang==0.16.0)
+        run: python -m pip install ziglang==0.16.0
 
       - name: Build installer + portable ZIP
         shell: bash
         run: bash scripts/build-windows.sh
 
-      - name: "Validate packaged application (--selftest)"
+      - name: Validate packaged application (--selftest)
         shell: bash
         working-directory: build/win/portable
         run: |
@@ -50,7 +95,7 @@ jobs:
           cat selftest.json
           python -c "import json; d=json.load(open('selftest.json')); assert d['layout'] and d['webview2Runtime'], d; print('selftest OK', d)"
 
-      - name: "Validate packaged application (--smoke, real Soak-shroom gameplay)"
+      - name: Validate packaged application (--smoke, real Soak-shroom gameplay)
         shell: bash
         working-directory: build/win/portable
         run: |
@@ -72,23 +117,26 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: windows-x64-${{ github.sha }}
+          name: windows-x64-${{ steps.ref.outputs.tag || github.sha }}
           path: |
             dist/PVZM-win64-portable.zip
             dist/PVZM-Setup-x64.exe
             dist/SHA256SUMS.txt
           retention-days: 14
 
-      - name: "Publish pre-release (v* tags only)"
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+      - name: Publish / attach release assets
+        if: steps.ref.outputs.tag != ''
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          TAG="${{ steps.ref.outputs.tag }}"
           NOTES="$(mktemp)"
           {
-            echo "Development pre-release. See desktop/RELEASE-NOTES.md in the repository."
+            echo "Development pre-release. See desktop/RELEASE-NOTES.md in the repository for details."
+            echo
+            echo "Built by .github/workflows/windows-release.yml on a Windows runner from ref \`$TAG\`."
             echo
             echo "### SHA-256"
             echo '```'
@@ -96,12 +144,23 @@ jobs:
             echo '```'
             echo
             echo "Unsigned executables. Requires Windows 10 x64 and the Microsoft Edge WebView2 Runtime."
+            echo "Portable ZIP: extract the whole archive and run PVZM.exe. Installer: per-user, no admin rights."
           } > "$NOTES"
-          gh release create "${{ github.ref_name }}" \
-            dist/PVZM-win64-portable.zip \
-            dist/PVZM-Setup-x64.exe \
-            dist/SHA256SUMS.txt \
-            --repo "${{ github.repository }}" \
-            --prerelease \
-            --title "${{ github.ref_name }}" \
-            --notes-file "$NOTES"
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "release $TAG exists -> attaching assets"
+            gh release upload "$TAG" \
+              dist/PVZM-win64-portable.zip \
+              dist/PVZM-Setup-x64.exe \
+              dist/SHA256SUMS.txt \
+              --repo "${{ github.repository }}" --clobber
+          else
+            echo "creating pre-release $TAG"
+            gh release create "$TAG" \
+              dist/PVZM-win64-portable.zip \
+              dist/PVZM-Setup-x64.exe \
+              dist/SHA256SUMS.txt \
+              --repo "${{ github.repository }}" \
+              --prerelease \
+              --title "$TAG" \
+              --notes-file "$NOTES"
+          fi

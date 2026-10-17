@@ -10,7 +10,8 @@
 #   SHA256SUMS.txt           SHA-256 checksums of both artifacts.
 #
 # Requirements (Linux x86_64 or Windows with bash):
-#   - zig 0.17.x         (pip install ziglang, or set ZIG=/path/to/zig)
+#   - zig 0.16.x         (pip install ziglang==0.16.0 — newest version with both
+#                         Linux and Windows wheels — or set ZIG=/path/to/zig)
 #   - python3 (or python), npm
 #
 # The Microsoft WebView2 SDK files (WebView2.h, libWebView2Loader.a,
